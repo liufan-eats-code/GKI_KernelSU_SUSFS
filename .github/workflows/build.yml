@@ -1459,19 +1459,49 @@ jobs:
         if: inputs.enable_susfs
         run: |
           LINES_BEFORE=$(wc -l < "$DEFCONFIG")
-          cat >> "$DEFCONFIG" << 'EOF'
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
-          EOF
+
+          # 不同 KSU 变体 / SUSFS 补丁版本暴露的选项并不一致。例如 BakaSU 的 SUSFS
+          # 补丁没有 KSU_SUSFS_PRIORITY_UID_FILTER；若把它强行写进 defconfig，
+          # Kleaf 的 defconfig 校验会报
+          #   CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER: actual '', expected '...=y'
+          #   Are they declared in Kconfig?
+          # 并中断整个构建。所以逐个确认 Kconfig 是否真的声明了该选项，
+          # 未声明的直接跳过，避免硬编码列表随上游变化而失效。
+          if ! grep -RqsE "^[[:space:]]*config[[:space:]]+KSU_SUSFS([[:space:]]|$)" \
+               "$KERNEL_ROOT/common" "$KERNEL_ROOT/KernelSU" 2>/dev/null; then
+            echo "::error::未找到 KSU_SUSFS 的 Kconfig 声明，SUSFS 无法启用"
+            exit 1
+          fi
+
+          SUSFS_OPTS="
+          CONFIG_KSU_SUSFS
+          CONFIG_KSU_SUSFS_SUS_PATH
+          CONFIG_KSU_SUSFS_SUS_MOUNT
+          CONFIG_KSU_SUSFS_SUS_KSTAT
+          CONFIG_KSU_SUSFS_SPOOF_UNAME
+          CONFIG_KSU_SUSFS_ENABLE_LOG
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT
+          CONFIG_KSU_SUSFS_SUS_MAP
+          CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+          "
+
+          SKIPPED=""
+          for _opt in $SUSFS_OPTS; do
+            _sym="${_opt#CONFIG_}"
+            if grep -RqsE "^[[:space:]]*config[[:space:]]+${_sym}([[:space:]]|$)" \
+                 "$KERNEL_ROOT/common" "$KERNEL_ROOT/KernelSU" 2>/dev/null; then
+              echo "${_opt}=y" >> "$DEFCONFIG"
+            else
+              SKIPPED="${SKIPPED} ${_opt}"
+              echo "::warning::${_opt} 未在当前 KSU 变体的 Kconfig 中声明，已跳过"
+            fi
+          done
+
+          if [ -n "$SKIPPED" ]; then
+            echo "已跳过未声明的 SUSFS 选项:${SKIPPED}"
+          fi
 
           # 把本步实际追加的行导出为配置片段，随 SUSFS 集成补丁一起分发
           if [ "$SUSFS_PATCH_EXPORT" = "true" ] && [ -d "$GITHUB_WORKSPACE/susfs-patch" ]; then
