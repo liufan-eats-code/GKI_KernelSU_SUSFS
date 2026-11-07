@@ -623,6 +623,63 @@ jobs:
               ;;
           esac
 
+          # ===== 关闭 SukiSU 安全模式 =====
+          # 原因: builtin 分支的 vol_detector_event() 用 static 变量累计音量键次数，
+          #       整个开机周期不清零、也没有时间窗口限制，正常调几次音量就会误触发
+          #       safe_mode_flag，导致所有模块被禁用。
+          # 做法: 让 ksu_is_safe_mode() 直接返回 false，音量键检测逻辑虽仍存在但永不生效。
+          if [[ "${{ inputs.ksu_variant }}" == SukiSU* ]]; then
+            KS_FILE="KernelSU/kernel/runtime/ksud.c"
+            if [ ! -f "$KS_FILE" ]; then
+              echo "::error::$KS_FILE 不存在，无法关闭安全模式，停止构建"
+              exit 1
+            fi
+            python3 - "$KS_FILE" <<'PYEOF'
+            import sys, pathlib
+            p = pathlib.Path(sys.argv[1])
+            s = p.read_text()
+            old = (
+                "bool ksu_is_safe_mode(void)\n"
+                "{\n"
+                "    // don't need to check again, userspace may call multiple times\n"
+                "    static bool already_checked = false;\n"
+                "    if (already_checked)\n"
+                "        return true;\n"
+                "\n"
+                "    // stop hook first!\n"
+                "    stop_input_hook();\n"
+                "\n"
+                "    if (!safe_mode_flag)\n"
+                "        return false;\n"
+                "\n"
+                "    pr_info(\"volume keys pressed max times, safe mode detected!\\n\");\n"
+                "    already_checked = true;\n"
+                "    return true;\n"
+                "}\n"
+            )
+            new = (
+                "bool ksu_is_safe_mode(void)\n"
+                "{\n"
+                "    /* PATCHED: safe mode disabled.\n"
+                "     * builtin branch used static, never-reset volume counters with no\n"
+                "     * time window, so normal volume changes could falsely trigger it\n"
+                "     * and disable all modules. Always report not-in-safe-mode. */\n"
+                "    return false;\n"
+                "}\n"
+            )
+            if "PATCHED: safe mode disabled" in s:
+                print("safe-mode patch already applied, skipping")
+                sys.exit(0)
+            if old not in s:
+                print("::error::ksu_is_safe_mode body not found; upstream changed")
+                sys.exit(1)
+            p.write_text(s.replace(old, new, 1))
+            print("safe mode disabled")
+            PYEOF
+            grep -q "PATCHED: safe mode disabled" "$KS_FILE" || { echo "::error::补丁写入后校验失败"; exit 1; }
+          fi
+          # ===== 结束 =====
+
           if [ -d "KernelSU/.git" ]; then
             KSU_LATEST_COMMIT_DATE=$(git -C KernelSU log -1 --date=format:'%Y-%m-%d %H:%M:%S %z' --format='%cd')
             echo "KSU_LATEST_COMMIT_DATE=$KSU_LATEST_COMMIT_DATE" >> $GITHUB_ENV
